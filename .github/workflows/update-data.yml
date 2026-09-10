@@ -1,0 +1,42 @@
+name: Update yields
+
+on:
+  schedule:
+    # 22:30 UTC on weekdays — after the US close, so every source has published.
+    - cron: '30 22 * * 1-5'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: update-yields
+  cancel-in-progress: false
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Fetch yields
+        run: python scripts/fetch_yields.py
+
+      - name: Commit if data changed
+        run: |
+          git config user.name  "yield-bot"
+          git config user.email "actions@github.com"
+          if git diff --quiet -- data/yields.json; then
+            echo "No change today."
+          else
+            git add data/yields.json
+            git commit -m "Update yields $(date -u +%Y-%m-%d)"
+            git push
+          fi

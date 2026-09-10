@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>30-Year Sovereign Yields</title>
+<meta name="description" content="Thirty-year government bond yields for the US, Germany, UK, France, Canada and Japan, from official sources.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@62..125,400..700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="assets/styles.css">
+</head>
+<body>
+<div class="wrap">
+
+  <header class="masthead">
+    <h1>The long end, six ways</h1>
+    <p>Thirty-year government bond yields, side by side. End-of-day figures published by each country&rsquo;s treasury or central bank.</p>
+  </header>
+
+  <div class="notice" id="notice" hidden></div>
+
+  <div class="controls">
+    <div class="ranges" role="group" aria-label="Time range">
+      <button type="button" data-range="1M" aria-pressed="false">1M</button>
+      <button type="button" data-range="3M" aria-pressed="false">3M</button>
+      <button type="button" data-range="6M" aria-pressed="false">6M</button>
+      <button type="button" data-range="1Y" aria-pressed="true">1Y</button>
+      <button type="button" data-range="3Y" aria-pressed="false">3Y</button>
+    </div>
+    <span class="stamp" id="stamp"></span>
+  </div>
+
+  <section class="hero">
+    <svg class="hero-chart" id="hero" role="img" aria-label="Thirty-year yields for six countries over the selected range"></svg>
+    <div class="legend" id="legend"></div>
+  </section>
+
+  <div class="grid-head">
+    <h2>By country</h2>
+    <span>Ranked by current yield, highest first</span>
+  </div>
+
+  <div class="grid" id="grid"></div>
+
+  <footer>
+    <p>Yields are end-of-day and are not investment advice. Each country&rsquo;s figure is the closest official equivalent of a 30-year yield, so they are comparable but not identical in construction &mdash; the US is a par yield, Germany and the UK are fitted zero-coupon spot curves, Canada is the designated long-term benchmark bond, and Japan is the MoF 30-year rate. France is the exception: Banque de France stopped publishing OAT rates in July 2024 and no official daily replacement exists, so France shows Eurostat&rsquo;s 10-year monthly average, drawn as a dashed line.</p>
+    <ul>
+      <li>United States &mdash; <a href="https://home.treasury.gov/resource-center/data-chart-center/interest-rates">US Department of the Treasury</a></li>
+      <li>Germany &mdash; <a href="https://www.bundesbank.de/en/statistics/time-series-databases">Deutsche Bundesbank</a></li>
+      <li>United Kingdom &mdash; <a href="https://www.bankofengland.co.uk/statistics/yield-curves">Bank of England</a></li>
+      <li>France &mdash; <a href="https://ec.europa.eu/eurostat/databrowser/view/irt_lt_mcby_m">Eurostat</a> (10-year, monthly average)</li>
+      <li>Canada &mdash; <a href="https://www.bankofcanada.ca/valet/docs">Bank of Canada Valet</a></li>
+      <li>Japan &mdash; <a href="https://www.mof.go.jp/english/policy/jgbs/reference/interest_rate/">Ministry of Finance</a></li>
+    </ul>
+  </footer>
+
+</div>
+
+<div class="tip" id="tip" data-show="false" role="status" aria-live="off"></div>
+<script src="assets/app.js"></script>
+</body>
+</html>
