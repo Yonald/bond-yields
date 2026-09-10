@@ -3,8 +3,8 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>30-Year Sovereign Yields</title>
-<meta name="description" content="Thirty-year government bond yields for the US, Germany, UK, France, Canada and Japan, from official sources.">
+<title>Sovereign Yields</title>
+<meta name="description" content="Ten- and thirty-year government bond yields for the US, Germany, UK, France, Canada and Japan, from official sources.">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@62..125,400..700&display=swap" rel="stylesheet">
@@ -15,12 +15,16 @@
 
   <header class="masthead">
     <h1>The long end, six ways</h1>
-    <p>Thirty-year government bond yields, side by side. End-of-day figures published by each country&rsquo;s treasury or central bank.</p>
+    <p>Government bond yields, side by side. End-of-day figures published by each country&rsquo;s treasury or central bank.</p>
   </header>
 
   <div class="notice" id="notice" hidden></div>
 
   <div class="controls">
+    <div class="maturities" role="group" aria-label="Maturity">
+      <button type="button" data-maturity="10Y" aria-pressed="false">10Y</button>
+      <button type="button" data-maturity="30Y" aria-pressed="true">30Y</button>
+    </div>
     <div class="ranges" role="group" aria-label="Time range">
       <button type="button" data-range="1M" aria-pressed="false">1M</button>
       <button type="button" data-range="3M" aria-pressed="false">3M</button>
@@ -32,7 +36,14 @@
   </div>
 
   <section class="hero">
-    <svg class="hero-chart" id="hero" role="img" aria-label="Thirty-year yields for six countries over the selected range"></svg>
+    <div class="hero-head">
+      <span class="yaxis" id="yaxis"></span>
+      <div class="modes" role="group" aria-label="Chart mode">
+        <button type="button" data-mode="level" aria-pressed="true">Levels</button>
+        <button type="button" data-mode="change" aria-pressed="false">Change</button>
+      </div>
+    </div>
+    <svg class="hero-chart" id="hero" role="img" aria-label="Government bond yields for six countries over the selected range"></svg>
     <div class="legend" id="legend"></div>
   </section>
 
@@ -44,7 +55,8 @@
   <div class="grid" id="grid"></div>
 
   <footer>
-    <p>Yields are end-of-day and are not investment advice. Each country&rsquo;s figure is the closest official equivalent of a 30-year yield, so they are comparable but not identical in construction &mdash; the US is a par yield, Germany and the UK are fitted zero-coupon spot curves, Canada is the designated long-term benchmark bond, and Japan is the MoF 30-year rate. France is the exception: Banque de France stopped publishing OAT rates in July 2024 and no official daily replacement exists, so France shows Eurostat&rsquo;s 10-year monthly average, drawn as a dashed line.</p>
+    <p>Yields are end-of-day and are not investment advice. Each figure is the closest official equivalent for that maturity, so they are comparable but not identical in construction &mdash; the US is a par yield, Germany and the UK are fitted zero-coupon spot curves, Canada uses its designated benchmark bonds, and Japan is the MoF rate. Spreads are quoted against the German Bund of the same maturity.</p>
+    <p>France is the exception: Banque de France stopped publishing OAT rates in July 2024 and no official daily replacement exists, so France shows Eurostat&rsquo;s 10-year monthly average, drawn as a dashed line. It has no 30-year equivalent, so the 10-year stands in on the 30Y view and is labelled accordingly.</p>
     <ul>
       <li>United States &mdash; <a href="https://home.treasury.gov/resource-center/data-chart-center/interest-rates">US Department of the Treasury</a></li>
       <li>Germany &mdash; <a href="https://www.bundesbank.de/en/statistics/time-series-databases">Deutsche Bundesbank</a></li>

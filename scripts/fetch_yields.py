@@ -1,21 +1,22 @@
 #!/usr/bin/env python3
 """
-Fetch 30-year government bond yields for six countries from official sources
-and merge them into data/yields.json.
+Fetch 10-year and 30-year government bond yields for six countries from
+official sources and merge them into data/yields.json.
 
 Every source is an official publisher (treasury / central bank). All values are
-end-of-day. Nothing here is intraday.
+end-of-day. Nothing here is intraday. No API keys required.
 
 Sources
-  US  US Treasury daily yield curve CSV          (30 Yr, par yield)
-  DE  Deutsche Bundesbank time series API        (Svensson spot, 30.0y residual)
-  UK  Bank of England GLC nominal daily data     (spot curve, 30y)
-  FR  Eurostat Maastricht convergence rate     (10Y, MONTHLY -- see README)
-  CA  Bank of Canada Valet API                   (long-term benchmark bond)
-  JP  Japan MoF JGB interest rate CSV            (30Y)
+  US  US Treasury daily yield curve CSV          (10 Yr / 30 Yr par yields)
+  DE  Deutsche Bundesbank time series API        (Svensson spot, 10.0y / 30.0y)
+  UK  Bank of England GLC nominal daily data     (spot curve, 10y / 30y)
+  FR  Eurostat Maastricht convergence rate       (10Y only, MONTHLY -- see README)
+  CA  Bank of Canada Valet API                   (10y benchmark / long benchmark)
+  JP  Japan MoF JGB interest rate CSV            (10Y / 30Y)
+
+Each fetcher returns {"10Y": {iso_date: yield}, "30Y": {...}}.
 
 Run:  python scripts/fetch_yields.py
-No API keys required.
 """
 
 from __future__ import annotations
@@ -33,8 +34,8 @@ import requests
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 DATA_FILE = ROOT / "data" / "yields.json"
 
-# Keep the stored history bounded so the JSON stays small enough to load fast.
 HISTORY_YEARS = 3
+MATURITIES = ["10Y", "30Y"]
 
 UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -43,19 +44,24 @@ UA = (
 TIMEOUT = 90
 
 COUNTRIES = {
-    "US": {"name": "United States", "bond": "30Y Treasury", "source": "US Treasury"},
-    "DE": {"name": "Germany", "bond": "30Y Bund", "source": "Deutsche Bundesbank"},
-    "UK": {"name": "United Kingdom", "bond": "30Y Gilt", "source": "Bank of England"},
+    "US": {"name": "United States", "bond": "Treasury", "source": "US Treasury"},
+    "DE": {"name": "Germany", "bond": "Bund", "source": "Deutsche Bundesbank"},
+    "UK": {"name": "United Kingdom", "bond": "Gilt", "source": "Bank of England"},
     "FR": {
         "name": "France",
-        "bond": "10Y \u00b7 monthly average",
+        "bond": "OAT",
         "source": "Eurostat",
         "freq": "monthly",
-        "caveat": "No official daily French yield exists since July 2024.",
+        # France has no 30Y source at all; the 10Y stands in, flagged in the UI.
+        "only": "10Y",
+        "caveat": "No official daily French yield since July 2024. Eurostat 10Y monthly average.",
     },
-    "CA": {"name": "Canada", "bond": "Long benchmark", "source": "Bank of Canada"},
-    "JP": {"name": "Japan", "bond": "30Y JGB", "source": "Japan Ministry of Finance"},
+    "CA": {"name": "Canada", "bond": "GoC benchmark", "source": "Bank of Canada"},
+    "JP": {"name": "Japan", "bond": "JGB", "source": "Japan Ministry of Finance"},
 }
+
+# Germany is the spread anchor for the whole page.
+ANCHOR = "DE"
 
 
 def get(url: str, **kw) -> requests.Response:
@@ -65,7 +71,6 @@ def get(url: str, **kw) -> requests.Response:
 
 
 def clean(pairs) -> dict[str, float]:
-    """Drop blanks, coerce to float, key by ISO date."""
     out = {}
     for date, value in pairs:
         if value in (None, "", ".", "-", "ND", "NaN"):
@@ -78,12 +83,12 @@ def clean(pairs) -> dict[str, float]:
 
 
 # --------------------------------------------------------------------------
-# Per-country fetchers. Each returns {"YYYY-MM-DD": yield_percent}
+# Per-country fetchers
 # --------------------------------------------------------------------------
 
-def fetch_us() -> dict[str, float]:
+def fetch_us() -> dict[str, dict[str, float]]:
     years = range(dt.date.today().year - HISTORY_YEARS + 1, dt.date.today().year + 1)
-    pairs = []
+    out = {m: [] for m in MATURITIES}
     for year in years:
         url = (
             "https://home.treasury.gov/resource-center/data-chart-center/"
@@ -91,39 +96,41 @@ def fetch_us() -> dict[str, float]:
             f"?type=daily_treasury_yield_curve&field_tdr_date_value={year}"
             "&page&_format=csv"
         )
-        rows = csv.DictReader(io.StringIO(get(url).text))
-        for row in rows:
+        for row in csv.DictReader(io.StringIO(get(url).text)):
             raw = row.get("Date")
             if not raw:
                 continue
             date = dt.datetime.strptime(raw.strip(), "%m/%d/%Y").date().isoformat()
-            pairs.append((date, row.get("30 Yr")))
-    return clean(pairs)
+            out["10Y"].append((date, row.get("10 Yr")))
+            out["30Y"].append((date, row.get("30 Yr")))
+    return {m: clean(v) for m, v in out.items()}
 
 
-def fetch_de() -> dict[str, float]:
-    series = "D.I.ZST.ZI.EUR.S1311.B.A604.R30XX.R.A.A._Z._Z.A"
-    url = (
-        f"https://api.statistiken.bundesbank.de/rest/download/BBSIS/{series}"
-        "?format=csv&lang=en"
-    )
-    pairs = []
-    for row in csv.reader(io.StringIO(get(url).text)):
-        if len(row) < 2:
-            continue
-        date = row[0].strip().strip('"').lstrip("\ufeff")
-        # Data rows start with an ISO date; metadata rows do not.
-        if len(date) == 10 and date[4] == "-" and date[7] == "-":
-            pairs.append((date, row[1].strip()))
-    return clean(pairs)
+def fetch_de() -> dict[str, dict[str, float]]:
+    keys = {"10Y": "R10XX", "30Y": "R30XX"}
+    out = {}
+    for maturity, code in keys.items():
+        series = f"D.I.ZST.ZI.EUR.S1311.B.A604.{code}.R.A.A._Z._Z.A"
+        url = (
+            f"https://api.statistiken.bundesbank.de/rest/download/BBSIS/{series}"
+            "?format=csv&lang=en"
+        )
+        pairs = []
+        for row in csv.reader(io.StringIO(get(url).text)):
+            if len(row) < 2:
+                continue
+            date = row[0].strip().strip('"').lstrip("\ufeff")
+            if len(date) == 10 and date[4] == "-" and date[7] == "-":
+                pairs.append((date, row[1].strip()))
+        out[maturity] = clean(pairs)
+    return out
 
 
-def fetch_uk(current_month_only: bool = True) -> dict[str, float]:
-    """Bank of England publishes the nominal spot curve as xlsx inside a zip.
+def fetch_uk(current_month_only: bool = True) -> dict[str, dict[str, float]]:
+    """Bank of England nominal spot curve, delivered as xlsx inside a zip.
 
-    The 'latest' zip holds the current month only, so this is designed to be
-    merged into an accumulating history. Use scripts/backfill_uk.py once to
-    load the archive.
+    The 'latest' zip holds the current month only, so this merges into an
+    accumulating history. Use scripts/backfill_uk.py once to load the archive.
     """
     import openpyxl
 
@@ -136,7 +143,8 @@ def fetch_uk(current_month_only: bool = True) -> dict[str, float]:
     )
     archive = zipfile.ZipFile(io.BytesIO(get(url).content))
     names = [n for n in archive.namelist() if "Nominal" in n and n.endswith(".xlsx")]
-    pairs = []
+    out = {m: [] for m in MATURITIES}
+
     for name in names:
         book = openpyxl.load_workbook(
             io.BytesIO(archive.read(name)), read_only=True, data_only=True
@@ -144,44 +152,53 @@ def fetch_uk(current_month_only: bool = True) -> dict[str, float]:
         if "4. spot curve" not in book.sheetnames:
             continue
         sheet = book["4. spot curve"]
-        col30 = None
+
+        columns = {}
         for row in sheet.iter_rows(values_only=True):
             if not row:
                 continue
             head = row[0]
-            # The header row labels each column with a maturity in years.
             if isinstance(head, str) and head.strip().lower() == "years:":
                 for idx, cell in enumerate(row):
-                    if isinstance(cell, (int, float)) and abs(cell - 30) < 1e-9:
-                        col30 = idx
+                    if not isinstance(cell, (int, float)):
+                        continue
+                    if abs(cell - 10) < 1e-9:
+                        columns["10Y"] = idx
+                    elif abs(cell - 30) < 1e-9:
+                        columns["30Y"] = idx
                 break
-        if col30 is None:
+        if not columns:
             continue
+
         for row in sheet.iter_rows(values_only=True):
-            if row and isinstance(row[0], dt.datetime) and len(row) > col30:
-                pairs.append((row[0].date().isoformat(), row[col30]))
+            if not row or not isinstance(row[0], dt.datetime):
+                continue
+            date = row[0].date().isoformat()
+            for maturity, idx in columns.items():
+                if len(row) > idx:
+                    out[maturity].append((date, row[idx]))
         book.close()
-    return clean(pairs)
+
+    return {m: clean(v) for m, v in out.items()}
 
 
-def fetch_fr() -> dict[str, float]:
+def fetch_fr() -> dict[str, dict[str, float]]:
     """France, via Eurostat's EMU convergence criterion series (monthly).
 
-    France is the exception on this page. Banque de France stopped publishing
-    OAT rates on 10 July 2024, and no official publisher has replaced them --
-    French govvies trade OTC, so the only daily signal comes from commercial
-    dealer-quote feeds. Eurostat's Maastricht long-term rate is the closest
-    free official substitute: 10-year rather than 30-year, and a monthly
-    average rather than a daily close.
-
-    Both compromises are surfaced in the UI rather than hidden. No API key.
+    Banque de France stopped publishing OAT rates on 10 July 2024 and no
+    official publisher replaced them -- French govvies trade OTC, so the only
+    daily signal comes from commercial dealer-quote feeds. Eurostat's Maastricht
+    long-term rate is the closest free official substitute: 10-year only, and a
+    monthly average rather than a daily close. There is no 30Y equivalent.
     """
     url = (
         "https://ec.europa.eu/eurostat/api/dissemination/statistics/1.0/data/"
         "irt_lt_mcby_m"
     )
     since = f"{dt.date.today().year - HISTORY_YEARS}-01"
-    payload = get(url, params={"format": "JSON", "geo": "FR", "sinceTimePeriod": since}).json()
+    payload = get(
+        url, params={"format": "JSON", "geo": "FR", "sinceTimePeriod": since}
+    ).json()
 
     periods = payload["dimension"]["time"]["category"]["index"]
     by_position = {position: period for period, position in periods.items()}
@@ -189,56 +206,57 @@ def fetch_fr() -> dict[str, float]:
     pairs = []
     for flat_index, value in payload.get("value", {}).items():
         period = by_position.get(int(flat_index))
-        if not period:
-            continue
-        # A monthly average belongs mid-month, not on the 1st.
-        pairs.append((f"{period}-15", value))
-    return clean(pairs)
+        if period:
+            # A monthly average belongs mid-month, not on the 1st.
+            pairs.append((f"{period}-15", value))
+    return {"10Y": clean(pairs), "30Y": {}}
 
 
-def fetch_ca() -> dict[str, float]:
+def fetch_ca() -> dict[str, dict[str, float]]:
     start = (dt.date.today() - dt.timedelta(days=365 * HISTORY_YEARS)).isoformat()
-    url = (
-        "https://www.bankofcanada.ca/valet/observations/"
-        f"BD.CDN.LONG.DQ.YLD/json?start_date={start}"
-    )
-    payload = get(url).json()
-    pairs = [
-        (obs["d"], obs.get("BD.CDN.LONG.DQ.YLD", {}).get("v"))
-        for obs in payload.get("observations", [])
-    ]
-    return clean(pairs)
+    # Canada has no formal 30Y benchmark; the long-term benchmark is the ~30Y bond.
+    keys = {"10Y": "BD.CDN.10YR.DQ.YLD", "30Y": "BD.CDN.LONG.DQ.YLD"}
+    out = {}
+    for maturity, series in keys.items():
+        url = (
+            "https://www.bankofcanada.ca/valet/observations/"
+            f"{series}/json?start_date={start}"
+        )
+        payload = get(url).json()
+        out[maturity] = clean(
+            (obs["d"], obs.get(series, {}).get("v"))
+            for obs in payload.get("observations", [])
+        )
+    return out
 
 
-def fetch_jp() -> dict[str, float]:
+def fetch_jp() -> dict[str, dict[str, float]]:
     base = "https://www.mof.go.jp/english/policy/jgbs/reference/interest_rate/"
-    pairs = []
+    out = {m: [] for m in MATURITIES}
     for suffix in ("historical/jgbcme_all.csv", "jgbcme.csv"):
         text = get(base + suffix).content.decode("shift_jis", errors="replace")
-        col30 = None
+        columns = {}
         for row in csv.reader(io.StringIO(text)):
             if not row:
                 continue
             if row[0].strip() == "Date":
-                col30 = row.index("30Y") if "30Y" in row else None
+                columns = {m: row.index(m) for m in MATURITIES if m in row}
                 continue
-            if col30 is None or len(row) <= col30:
+            if not columns:
                 continue
             try:
-                date = dt.datetime.strptime(row[0].strip(), "%Y/%m/%d").date()
+                date = dt.datetime.strptime(row[0].strip(), "%Y/%m/%d").date().isoformat()
             except ValueError:
                 continue
-            pairs.append((date.isoformat(), row[col30].strip()))
-    return clean(pairs)
+            for maturity, idx in columns.items():
+                if len(row) > idx:
+                    out[maturity].append((date, row[idx].strip()))
+    return {m: clean(v) for m, v in out.items()}
 
 
 FETCHERS = {
-    "US": fetch_us,
-    "DE": fetch_de,
-    "UK": fetch_uk,
-    "FR": fetch_fr,
-    "CA": fetch_ca,
-    "JP": fetch_jp,
+    "US": fetch_us, "DE": fetch_de, "UK": fetch_uk,
+    "FR": fetch_fr, "CA": fetch_ca, "JP": fetch_jp,
 }
 
 
@@ -251,25 +269,35 @@ def main() -> int:
     countries, failures = {}, []
 
     for code, meta in COUNTRIES.items():
-        history = {d: v for d, v in existing.get(code, {}).get("series", [])}
+        prior = existing.get(code, {}).get("series", {})
+        # Tolerate the old single-maturity file shape on first upgrade.
+        if isinstance(prior, list):
+            prior = {"30Y": prior}
+        history = {m: {d: v for d, v in prior.get(m, [])} for m in MATURITIES}
+
         try:
             fresh = FETCHERS[code]()
-            history.update(fresh)
-            print(f"  {code}: +{len(fresh)} points fetched")
-        except Exception as exc:  # keep one bad source from killing the run
+            for maturity in MATURITIES:
+                history[maturity].update(fresh.get(maturity, {}))
+            counts = ", ".join(f"{m} +{len(fresh.get(m, {}))}" for m in MATURITIES)
+            print(f"  {code}: {counts}")
+        except Exception as exc:
             failures.append(code)
             print(f"  {code}: FAILED ({exc.__class__.__name__}: {exc})")
 
-        series = sorted((d, v) for d, v in history.items() if d >= cutoff)
+        series, last, last_date = {}, {}, {}
+        for maturity in MATURITIES:
+            points = sorted((d, v) for d, v in history[maturity].items() if d >= cutoff)
+            if not points:
+                continue
+            series[maturity] = [list(p) for p in points]
+            last[maturity] = points[-1][1]
+            last_date[maturity] = points[-1][0]
+
         if not series:
             continue
-        countries[code] = {
-            **meta,
-            "last": series[-1][1],
-            "lastDate": series[-1][0],
-            "series": [list(point) for point in series],
-        }
-        print(f"      -> {len(series)} stored, latest {series[-1][0]} = {series[-1][1]}%")
+        countries[code] = {**meta, "series": series, "last": last, "lastDate": last_date}
+        print(f"      -> {', '.join(f'{m}={last[m]}%' for m in sorted(last))}")
 
     if not countries:
         print("No data at all; refusing to overwrite.")
@@ -280,7 +308,8 @@ def main() -> int:
         json.dumps(
             {
                 "updated": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
-                "maturity": "30Y",
+                "maturities": MATURITIES,
+                "anchor": ANCHOR,
                 "note": "End-of-day official data. Not intraday, not investment advice.",
                 "stale": failures,
                 "countries": countries,

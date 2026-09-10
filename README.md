@@ -1,6 +1,10 @@
-# 30-Year Sovereign Yields
+# Sovereign Yields
 
-A single page showing 30-year government bond yields for the US, Germany, UK, France, Canada and Japan, with 1-day, 1-week, 1-month and year-to-date changes in basis points.
+A single page showing **10-year and 30-year** government bond yields for the US, Germany, UK, France, Canada and Japan.
+
+Each country panel carries 1-day, 1-week, 1-month and year-to-date changes in basis points, the spread against the German Bund of the same maturity, and a bar showing where today sits inside the selected window's range.
+
+The main chart has two modes. **Levels** plots absolute yields. **Change** rebases every line to zero at the start of the window, which is usually the more useful view -- it answers "who is moving" rather than "who has high yields", and stops the tightly-clustered countries disappearing into each other.
 
 No server, no database, no build step. A scheduled GitHub Action fetches the data, commits it as JSON, and GitHub Pages serves the page.
 
@@ -20,12 +24,12 @@ Every source is the official publisher. No API keys are needed anywhere. All val
 
 | Country | Series | Source | Key needed |
 |---|---|---|---|
-| US | 30-year par yield | US Treasury daily yield curve CSV | No |
-| Germany | 30.0y residual maturity, Svensson fit | Bundesbank time series API | No |
-| UK | 30y nominal spot rate | Bank of England yield curve files | No |
+| US | 10Y + 30Y par yields | US Treasury daily yield curve CSV | No |
+| Germany | 10.0y + 30.0y residual, Svensson fit | Bundesbank time series API | No |
+| UK | 10y + 30y nominal spot rates | Bank of England yield curve files | No |
 | France | 10-year, monthly average | Eurostat (Maastricht rate) | No |
-| Canada | Long-term benchmark bond | Bank of Canada Valet API | No |
-| Japan | 30Y JGB | Ministry of Finance CSV | No |
+| Canada | 10y + long-term benchmark bonds | Bank of Canada Valet API | No |
+| Japan | 10Y + 30Y JGB | Ministry of Finance CSV | No |
 
 **France is a deliberate exception.** Banque de France stopped publishing OAT rates on 10 July 2024, and no official publisher replaced them. French government bonds trade over the counter, so the only daily signal now comes from commercial dealer-quote feeds (Trading Economics, EODHD and similar), which cost roughly $50/month and whose terms restrict republishing on a public site.
 
@@ -37,7 +41,9 @@ Verified dead ends, so you don't repeat them: Banque de France's new Opendatasof
 
 The other five are the closest official equivalents of a 30-year yield, but they are not identical in construction. The US is a par yield, Germany and the UK are fitted zero-coupon spot curves, Canada is the designated long-term benchmark bond, and Japan is the MoF 30-year rate. Comparable in level and direction; don't treat small cross-country differences as precise.
 
-Canada has no formal 30-year benchmark series, so `BD.CDN.LONG.DQ.YLD` (the long-term benchmark, currently a ~30-year bond) is used.
+Canada has no formal 30-year benchmark series, so `BD.CDN.LONG.DQ.YLD` (the long-term benchmark, currently a ~30-year bond) stands in for 30Y.
+
+France has no 30-year source of any kind. On the 30Y view its 10-year series stands in, tagged `10Y` in the legend and labelled on its panel; its spread is computed against the 10-year Bund rather than the 30-year, so the comparison stays like-for-like.
 
 ## Setup
 
@@ -82,13 +88,15 @@ Then open `http://localhost:8000`. Opening `index.html` directly as a `file://` 
 
 ## Notes
 
-- `data/yields.json` keeps three years of history, about 60–80 KB.
-- The UK daily fetch only reads the Bank of England's current-month file. History accumulates in the JSON. If UK history is ever lost, `python scripts/backfill_uk.py` reloads it from the full archive.
+- `data/yields.json` keeps three years of history for both maturities, about 190 KB.
+- The UK daily fetch only reads the Bank of England's current-month file. History accumulates in the JSON. If UK history is ever lost, `python scripts/backfill_uk.py` reloads both maturities from the full archive.
 - If a source breaks, the run keeps going, the country's existing history is preserved, and its code is listed in the `stale` field so the page can flag it.
 - The schedule is weekdays only, since bond markets don't publish at weekends.
 
 ## Adding a country or a maturity
 
-Add an entry to `COUNTRIES` and a matching function in `FETCHERS` in `scripts/fetch_yields.py`, returning `{"YYYY-MM-DD": yield_as_percent}`. Then add the country code to `ORDER` in `assets/app.js` and a colour variable in `assets/styles.css`. Nothing else needs to change.
+Add an entry to `COUNTRIES` and a matching function in `FETCHERS` in `scripts/fetch_yields.py`, returning `{"10Y": {"YYYY-MM-DD": pct}, "30Y": {...}}`. Then add the country code to `ORDER` in `assets/app.js` and a colour variable in `assets/styles.css`.
+
+For a new maturity, add it to `MATURITIES` in the fetcher, teach each source function to return it, and add a button to the `.maturities` group in `index.html`. The front end reads the maturity list from the data, so nothing else needs changing.
 
 Not investment advice.

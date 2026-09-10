@@ -1,11 +1,17 @@
-/* 30-year sovereign yields — rendering and interaction.
+/* Sovereign yields — rendering and interaction.
    No build step, no dependencies. Charts are hand-drawn SVG. */
 
 const SVG_NS = 'http://www.w3.org/2000/svg';
 const ORDER = ['US', 'DE', 'UK', 'FR', 'CA', 'JP'];
 const RANGES = { '1M': 30, '3M': 91, '6M': 182, '1Y': 365, '3Y': 1095 };
 
-const state = { data: null, range: '1Y', hidden: new Set() };
+const state = {
+  data: null,
+  range: '1Y',
+  maturity: '30Y',
+  mode: 'level', // 'level' = absolute yields, 'change' = rebased to zero
+  hidden: new Set(),
+};
 
 const el = (id) => document.getElementById(id);
 const colour = (code) => `var(--${code.toLowerCase()})`;
@@ -16,16 +22,38 @@ function make(tag, attrs = {}) {
   return node;
 }
 
-/* ---------- data helpers ---------- */
+/* ---------- data access ----------
+   France has no 30Y source at all, so it falls back to its 10Y series and the
+   UI flags that rather than hiding it. Everything downstream asks for a series
+   through resolve() so the fallback is handled in exactly one place. */
 
-// Series are [isoDate, yield] sorted ascending.
+function resolve(code, maturity = state.maturity) {
+  const country = state.data.countries[code];
+  if (!country) return null;
+  const available = country.series[maturity]
+    ? maturity
+    : country.only && country.series[country.only]
+      ? country.only
+      : null;
+  if (!available) return null;
+  return {
+    country,
+    code,
+    actual: available,
+    fallback: available !== maturity,
+    monthly: country.freq === 'monthly',
+    series: country.series[available],
+    last: country.last[available],
+    lastDate: country.lastDate[available],
+  };
+}
+
 function windowed(series, days) {
   const cutoff = new Date(Date.now() - days * 864e5).toISOString().slice(0, 10);
   const slice = series.filter(([d]) => d >= cutoff);
   return slice.length > 1 ? slice : series.slice(-2);
 }
 
-// Value at or immediately before a target date — bond markets have gaps.
 function asOf(series, targetIso) {
   let found = null;
   for (const [d, v] of series) {
@@ -35,11 +63,9 @@ function asOf(series, targetIso) {
   return found;
 }
 
-function daysAgo(n) {
-  return new Date(Date.now() - n * 864e5).toISOString().slice(0, 10);
-}
+const daysAgo = (n) => new Date(Date.now() - n * 864e5).toISOString().slice(0, 10);
 
-function changes(series, monthly = false) {
+function changes(series, monthly) {
   const last = series[series.length - 1][1];
   const prev = series.length > 1 ? series[series.length - 2][1] : null;
   const jan1 = `${new Date().getFullYear() - 1}-12-31`;
@@ -55,25 +81,22 @@ function changes(series, monthly = false) {
   };
 }
 
-function fmtBp(v) {
+function fmtBp(v, withSign = true) {
   if (v == null) return { text: '—', cls: 'flat' };
   const sign = v > 0 ? '+' : v < 0 ? '\u2212' : '';
   return {
-    text: `${sign}${Math.abs(v)} bp`,
+    text: `${withSign ? sign : ''}${Math.abs(v)} bp`,
     cls: v > 0 ? 'up' : v < 0 ? 'down' : 'flat',
   };
 }
 
 function fmtDate(iso) {
   return new Date(iso + 'T00:00:00Z').toLocaleDateString('en-GB', {
-    day: 'numeric',
-    month: 'short',
-    year: 'numeric',
-    timeZone: 'UTC',
+    day: 'numeric', month: 'short', year: 'numeric', timeZone: 'UTC',
   });
 }
 
-/* ---------- shared scale maths ---------- */
+/* ---------- scales ---------- */
 
 function niceTicks(min, max, count = 5) {
   const span = max - min || 1;
@@ -99,18 +122,22 @@ function buildScale(seriesList, box) {
   const t0 = Date.parse(dates[0]);
   const t1 = Date.parse(dates[dates.length - 1]) || t0 + 1;
   return {
-    dates,
-    lo,
-    hi,
+    dates, lo, hi,
     x: (iso) => box.l + ((Date.parse(iso) - t0) / (t1 - t0 || 1)) * box.w,
     y: (v) => box.t + (1 - (v - lo) / (hi - lo || 1)) * box.h,
   };
 }
 
-function pathFor(series, scale) {
-  return series
+const pathFor = (series, scale) =>
+  series
     .map(([d, v], i) => `${i ? 'L' : 'M'}${scale.x(d).toFixed(2)},${scale.y(v).toFixed(2)}`)
     .join('');
+
+// Rebasing to the first point in the window turns "who has high yields"
+// (static) into "who is moving" (why you'd open the page daily).
+function rebase(series) {
+  const base = series[0][1];
+  return series.map(([d, v]) => [d, (v - base) * 100]);
 }
 
 /* ---------- hero chart ---------- */
@@ -118,42 +145,40 @@ function pathFor(series, scale) {
 function drawHero() {
   const svg = el('hero');
   svg.textContent = '';
-  // A narrower viewBox on small screens keeps 12px labels legible once scaled.
   const narrow = window.innerWidth < 700;
   const W = narrow ? 460 : 1000;
   const H = narrow ? 360 : 420;
-  const box = { l: narrow ? 34 : 46, t: 16, w: 0, h: H - 16 - 34 };
+  const box = { l: narrow ? 38 : 52, t: 16, w: 0, h: H - 16 - 34 };
   box.w = W - box.l - (narrow ? 34 : 58);
   svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
 
   const days = RANGES[state.range];
-  const visible = ORDER.filter((c) => state.data.countries[c] && !state.hidden.has(c));
+  const visible = ORDER.filter((c) => resolve(c) && !state.hidden.has(c));
   if (!visible.length) return;
 
+  const changeMode = state.mode === 'change';
   const seriesMap = {};
-  visible.forEach((c) => {
-    seriesMap[c] = windowed(state.data.countries[c].series, days);
+  visible.forEach((code) => {
+    const win = windowed(resolve(code).series, days);
+    seriesMap[code] = changeMode ? rebase(win) : win;
   });
   const scale = buildScale(Object.values(seriesMap), box);
 
-  // horizontal gridlines + y labels
   niceTicks(scale.lo, scale.hi).forEach((t) => {
     const y = scale.y(t);
-    svg.append(
-      make('line', {
-        x1: box.l, x2: box.l + box.w, y1: y, y2: y,
-        stroke: 'var(--rule)', 'stroke-width': 1,
-      })
-    );
+    const zero = changeMode && Math.abs(t) < 1e-9;
+    svg.append(make('line', {
+      x1: box.l, x2: box.l + box.w, y1: y, y2: y,
+      stroke: zero ? 'var(--muted)' : 'var(--rule)', 'stroke-width': 1,
+    }));
     const label = make('text', {
       x: box.l - 9, y: y + 4, 'text-anchor': 'end',
       fill: 'var(--faint)', 'font-size': 12,
     });
-    label.textContent = t.toFixed(2);
+    label.textContent = changeMode ? Math.round(t) : t.toFixed(2);
     svg.append(label);
   });
 
-  // x labels at start / middle / end
   [0, Math.floor(scale.dates.length / 2), scale.dates.length - 1].forEach((i) => {
     const iso = scale.dates[i];
     const label = make('text', {
@@ -167,37 +192,24 @@ function drawHero() {
     svg.append(label);
   });
 
-  // one line per country
   visible.forEach((code) => {
     const series = seriesMap[code];
-    svg.append(
-      make('path', {
-        d: pathFor(series, scale),
-        fill: 'none',
-        stroke: colour(code),
-        'stroke-width': 1.9,
-        'stroke-linejoin': 'round',
-        'stroke-linecap': 'round',
-        ...(state.data.countries[code].freq === 'monthly'
-          ? { 'stroke-dasharray': '5 4' }
-          : {}),
-      })
-    );
+    svg.append(make('path', {
+      d: pathFor(series, scale), fill: 'none', stroke: colour(code),
+      'stroke-width': 1.9, 'stroke-linejoin': 'round', 'stroke-linecap': 'round',
+      ...(resolve(code).monthly ? { 'stroke-dasharray': '5 4' } : {}),
+    }));
     const [lastDate, lastVal] = series[series.length - 1];
-    svg.append(
-      make('circle', { cx: scale.x(lastDate), cy: scale.y(lastVal), r: 3, fill: colour(code) })
-    );
+    svg.append(make('circle', {
+      cx: scale.x(lastDate), cy: scale.y(lastVal), r: 3, fill: colour(code),
+    }));
   });
 
-  // End-of-line country tags, nudged apart so close yields stay readable.
+  // Nudge end labels apart so close yields stay readable.
   const GAP = 13;
   const tags = visible
-    .map((code) => {
-      const series = seriesMap[code];
-      return { code, y: scale.y(series[series.length - 1][1]) };
-    })
+    .map((code) => ({ code, y: scale.y(seriesMap[code][seriesMap[code].length - 1][1]) }))
     .sort((a, b) => a.y - b.y);
-
   for (let i = 1; i < tags.length; i++) {
     if (tags[i].y - tags[i - 1].y < GAP) tags[i].y = tags[i - 1].y + GAP;
   }
@@ -207,13 +219,10 @@ function drawHero() {
   tags.forEach(({ code, y }) => {
     const anchorY = scale.y(seriesMap[code][seriesMap[code].length - 1][1]);
     if (Math.abs(anchorY - y) > 2) {
-      svg.append(
-        make('line', {
-          x1: box.l + box.w + 2, x2: box.l + box.w + 6,
-          y1: anchorY, y2: y,
-          stroke: colour(code), 'stroke-width': 1, opacity: 0.55,
-        })
-      );
+      svg.append(make('line', {
+        x1: box.l + box.w + 2, x2: box.l + box.w + 6, y1: anchorY, y2: y,
+        stroke: colour(code), 'stroke-width': 1, opacity: 0.55,
+      }));
     }
     const tag = make('text', {
       x: box.l + box.w + 9, y: y + 4,
@@ -224,18 +233,20 @@ function drawHero() {
   });
 
   const crosshair = make('line', {
-    y1: box.t, y2: box.t + box.h,
-    stroke: 'var(--ink)', 'stroke-width': 1,
+    y1: box.t, y2: box.t + box.h, stroke: 'var(--ink)', 'stroke-width': 1,
     'stroke-dasharray': '3 3', opacity: 0,
   });
   svg.append(crosshair);
+  attachTooltip(svg, box, scale, seriesMap, visible, crosshair, changeMode);
 
-  attachTooltip(svg, box, scale, seriesMap, visible, crosshair);
+  el('yaxis').textContent = changeMode
+    ? `Change in basis points since ${fmtDate(scale.dates[0])}`
+    : `Yield, per cent`;
 }
 
-/* ---------- tooltip / crosshair ---------- */
+/* ---------- tooltip ---------- */
 
-function attachTooltip(svg, box, scale, seriesMap, visible, crosshair) {
+function attachTooltip(svg, box, scale, seriesMap, visible, crosshair, changeMode) {
   const tip = el('tip');
 
   const move = (event) => {
@@ -245,7 +256,6 @@ function attachTooltip(svg, box, scale, seriesMap, visible, crosshair) {
     const localX = (point.clientX - rect.left) / vbScale;
     if (localX < box.l - 4 || localX > box.l + box.w + 4) return hide();
 
-    // nearest date on the shared axis
     let best = scale.dates[0];
     let bestGap = Infinity;
     for (const iso of scale.dates) {
@@ -261,7 +271,10 @@ function attachTooltip(svg, box, scale, seriesMap, visible, crosshair) {
       .map((code) => {
         const value = asOf(seriesMap[code], best);
         if (value == null) return '';
-        return `<div class="trow"><span style="color:${colour(code)}">${code}</span><b>${value.toFixed(2)}%</b></div>`;
+        const shown = changeMode
+          ? `${value > 0 ? '+' : value < 0 ? '\u2212' : ''}${Math.abs(Math.round(value))} bp`
+          : `${value.toFixed(2)}%`;
+        return `<div class="trow"><span style="color:${colour(code)}">${code}</span><b>${shown}</b></div>`;
       })
       .join('');
     tip.innerHTML = `<div class="tdate">${fmtDate(best)}</div>${rows}`;
@@ -291,8 +304,8 @@ function drawLegend() {
   const host = el('legend');
   host.textContent = '';
   ORDER.forEach((code) => {
-    const country = state.data.countries[code];
-    if (!country) return;
+    const info = resolve(code);
+    if (!info) return;
     const shown = !state.hidden.has(code);
     const button = document.createElement('button');
     button.type = 'button';
@@ -300,8 +313,9 @@ function drawLegend() {
     button.style.color = colour(code);
     button.innerHTML =
       `<span class="swatch"></span>` +
-      `<span class="lname" style="color:var(--ink)">${country.name}</span>` +
-      `<span class="lval" style="color:var(--ink)">${country.last.toFixed(2)}%</span>`;
+      `<span class="lname" style="color:var(--ink)">${info.country.name}</span>` +
+      `<span class="lval" style="color:var(--ink)">${info.last.toFixed(2)}%</span>` +
+      (info.fallback ? `<span class="lflag">${info.actual}</span>` : '');
     button.addEventListener('click', () => {
       state.hidden.has(code) ? state.hidden.delete(code) : state.hidden.add(code);
       if (state.hidden.size === ORDER.length) state.hidden.delete(code);
@@ -312,7 +326,7 @@ function drawLegend() {
   });
 }
 
-/* ---------- country panels ---------- */
+/* ---------- panels ---------- */
 
 function sparkline(series) {
   const W = 320;
@@ -323,45 +337,65 @@ function sparkline(series) {
     viewBox: `0 0 ${W} ${H}`, class: 'spark',
     preserveAspectRatio: 'none', role: 'img',
   });
-  const rising = series[series.length - 1][1] >= series[0][1];
-  const stroke = rising ? 'var(--up)' : 'var(--down)';
-  const area = `${pathFor(series, scale)}L${scale.x(series[series.length - 1][0]).toFixed(2)},${H}L${scale.x(series[0][0]).toFixed(2)},${H}Z`;
-  svg.append(make('path', { d: area, fill: stroke, opacity: 0.07 }));
-  svg.append(
-    make('path', {
-      d: pathFor(series, scale), fill: 'none', stroke,
-      'stroke-width': 1.6, 'stroke-linejoin': 'round',
-      'vector-effect': 'non-scaling-stroke',
-    })
-  );
+  // Neutral ink: the coloured change figures below already carry direction,
+  // and over a year every line is red, so the colour carried no information.
+  svg.append(make('path', {
+    d: pathFor(series, scale), fill: 'none', stroke: 'var(--muted)',
+    'stroke-width': 1.5, 'stroke-linejoin': 'round',
+    'vector-effect': 'non-scaling-stroke',
+  }));
   return svg;
+}
+
+// Where today sits inside the window's range, as a bar rather than arithmetic.
+function rangeBar(values, current) {
+  const lo = Math.min(...values);
+  const hi = Math.max(...values);
+  const pct = hi === lo ? 50 : ((current - lo) / (hi - lo)) * 100;
+
+  const wrap = document.createElement('div');
+  wrap.className = 'rangebar';
+  wrap.innerHTML =
+    `<span class="rb-end">${lo.toFixed(2)}</span>` +
+    `<span class="rb-track"><span class="rb-marker" style="left:${pct.toFixed(1)}%"></span></span>` +
+    `<span class="rb-end">${hi.toFixed(2)}</span>`;
+  wrap.title = `${state.range} range: ${lo.toFixed(2)}% to ${hi.toFixed(2)}%, now ${current.toFixed(2)}%`;
+  return wrap;
 }
 
 function drawPanels() {
   const grid = el('grid');
   grid.textContent = '';
 
-  // Attach the code before filtering — filtering first would shift the indices.
-  const ranked = ORDER.map((code) => ({ code, ...state.data.countries[code] }))
-    .filter((c) => c.series)
+  const ranked = ORDER.map((code) => resolve(code))
+    .filter(Boolean)
     .sort((a, b) => b.last - a.last);
 
-  ranked.forEach((country, index) => {
-    const series = windowed(country.series, RANGES[state.range]);
-    const monthly = country.freq === 'monthly';
-    const delta = changes(country.series, monthly);
+  ranked.forEach((info) => {
+    // Compare like with like: France's 10Y fallback is spread against Bunds
+    // at 10Y, not against the 30Y Bund.
+    const anchor = resolve(state.data.anchor || 'DE', info.actual);
+    const spread =
+      anchor && info.code !== anchor.code
+        ? Math.round((info.last - anchor.last) * 100)
+        : null;
+
+    const series = windowed(info.series, RANGES[state.range]);
+    const delta = changes(info.series, info.monthly);
     const values = series.map(([, v]) => v);
 
     const panel = document.createElement('article');
     panel.className = 'panel';
+    const label = info.monthly
+      ? `${info.actual} · monthly average`
+      : `${info.actual} ${info.country.bond}`;
     panel.innerHTML = `
       <div class="panel-top">
         <div>
-          <span class="rank">${index + 1} of ${ranked.length}</span>
-          <h3 class="pname">${country.name}</h3>
-          <span class="pbond">${country.bond}</span>
+          <h3 class="pname">${info.country.name}</h3>
+          <span class="pbond">${label}</span>
         </div>
-        <div class="pyield" style="color:${colour(country.code)}">${country.last.toFixed(2)}<sup>%</sup></div>
+        <div class="pyield" style="color:${colour(info.code)}">${info.last.toFixed(2)}<sup>%</sup></div>
       </div>`;
 
     panel.append(sparkline(series));
@@ -369,26 +403,37 @@ function drawPanels() {
     const dl = document.createElement('dl');
     dl.className = 'changes';
     dl.innerHTML = Object.entries(delta)
-      .map(([label, value]) => {
+      .map(([name, value]) => {
         const f = fmtBp(value);
-        return `<div class="chg"><dt>${label}</dt><dd class="${f.cls}">${f.text}</dd></div>`;
+        return `<div class="chg"><dt>${name}</dt><dd class="${f.cls}">${f.text}</dd></div>`;
       })
       .join('');
     panel.append(dl);
 
-    if (country.caveat) {
+    const spreadRow = document.createElement('div');
+    spreadRow.className = 'spread';
+    if (info.code === (state.data.anchor || 'DE')) {
+      spreadRow.innerHTML = `<span>Spread benchmark</span><b class="flat">anchor</b>`;
+    } else {
+      const f = fmtBp(spread);
+      spreadRow.innerHTML =
+        `<span>vs ${info.actual} Bund</span><b class="${f.cls}">${f.text}</b>`;
+    }
+    panel.append(spreadRow);
+
+    panel.append(rangeBar(values, info.last));
+
+    if (info.country.caveat) {
       const caveat = document.createElement('p');
       caveat.className = 'caveat';
-      caveat.textContent = country.caveat;
+      caveat.textContent = info.country.caveat;
       panel.append(caveat);
     }
 
-    const range = document.createElement('div');
-    range.className = 'range-row';
-    range.innerHTML =
-      `<span>${state.range} range ${Math.min(...values).toFixed(2)} – ${Math.max(...values).toFixed(2)}%</span>` +
-      `<span class="asof">${fmtDate(country.lastDate)}</span>`;
-    panel.append(range);
+    const foot = document.createElement('div');
+    foot.className = 'asof';
+    foot.textContent = fmtDate(info.lastDate);
+    panel.append(foot);
 
     grid.append(panel);
   });
@@ -400,6 +445,19 @@ function renderAll() {
   drawHero();
   drawLegend();
   drawPanels();
+}
+
+function wireToggle(selector, key, after) {
+  document.querySelectorAll(selector).forEach((button) => {
+    button.addEventListener('click', () => {
+      state[key] = button.dataset[key];
+      document.querySelectorAll(selector).forEach((b) => {
+        b.setAttribute('aria-pressed', String(b === button));
+      });
+      if (after) after();
+      renderAll();
+    });
+  });
 }
 
 async function init() {
@@ -415,13 +473,13 @@ async function init() {
     return;
   }
 
-  const missing = ORDER.filter((c) => !state.data.countries[c]);
   const stale = state.data.stale || [];
+  const missing = ORDER.filter((c) => !state.data.countries[c]);
   if (missing.length || stale.length) {
     const codes = [...new Set([...missing, ...stale])].join(', ');
     el('notice').innerHTML =
       `<h3>Some countries aren't updating</h3><p>No fresh data for ${codes}. ` +
-      `See the data sources note below for what each feed needs.</p>`;
+      `See the data sources note below.</p>`;
     el('notice').hidden = false;
   }
 
@@ -429,15 +487,9 @@ async function init() {
     dateStyle: 'medium', timeStyle: 'short',
   })}`;
 
-  document.querySelectorAll('.ranges button').forEach((button) => {
-    button.addEventListener('click', () => {
-      state.range = button.dataset.range;
-      document.querySelectorAll('.ranges button').forEach((b) => {
-        b.setAttribute('aria-pressed', String(b === button));
-      });
-      renderAll();
-    });
-  });
+  wireToggle('.maturities button', 'maturity');
+  wireToggle('.ranges button', 'range');
+  wireToggle('.modes button', 'mode');
 
   renderAll();
   let timer;
